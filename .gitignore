@@ -1,3 +1,14 @@
 backend/.env
 frontend/node_modules
 backend/.venv
+backend/app/db/_pycache_
+backend/app/routers/_pycache_
+backend/app/services/_pycache_
+backend/app/agents/_pycache_
+backend/app/deps/_pycache_
+backend/app/core/_pycache_
+backend/app/models/_pycache_
+backend/app/schemas/_pycache_
+backend/app/utils/_pycache_
+backend/app/tests/_pycache_
+backend/app/tests/_pycache_
