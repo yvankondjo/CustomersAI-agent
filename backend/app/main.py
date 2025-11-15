@@ -1,13 +1,22 @@
 """FastAPI application for Customer AI Support Platform"""
+import sys
 import logging
+import asyncio
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from app.config import settings
-from app.models.schemas import MessageRequest, MessageResponse
-from app.agents.router import create_agent
+from app.core.config import get_settings
+settings = get_settings()
+from app.schemas.message import MessageRequest, MessageResponse
+from app.services.rag_agent import create_rag_agent
+from app.deps.runtime_prod import CHECKPOINTER_POSTGRES
 from app.services.supabase_client import supabase_service
 from app.services.rag import rag_service
+from app.routers import ingestion, documents, faq, knowledge, playground, instagram, conversations, ai_settings, social_accounts
 
 # Configure logging
 logging.basicConfig(
@@ -21,7 +30,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown"""
     # Startup
-    logger.info("=€ Starting Customer AI Support Platform")
+    logger.info("=ï¿½ Starting Customer AI Support Platform")
 
     # Initialize Qdrant collection (run once)
     try:
@@ -52,6 +61,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(ingestion.router)
+app.include_router(documents.router)
+app.include_router(faq.router)
+app.include_router(knowledge.router)
+app.include_router(playground.router)
+app.include_router(instagram.router)
+app.include_router(conversations.router)
+app.include_router(ai_settings.router)
+app.include_router(social_accounts.router)
+
 
 @app.get("/")
 async def root():
@@ -80,22 +99,21 @@ async def handle_support_message(request: MessageRequest):
     This endpoint:
     1. Gets or creates conversation in Supabase
     2. Saves user message
-    3. Routes through LangGraph agent (FAQ ’ RAG ’ Escalation)
+    3. Routes through LangGraph agent (FAQ ï¿½ RAG ï¿½ Escalation)
     4. Saves AI response
     5. Returns response to user
 
     Args:
-        request: MessageRequest with tenant_id, user_id, channel, content
+        request: MessageRequest with user_id, channel, content
 
     Returns:
         MessageResponse with AI response, intent, confidence, sources
     """
     try:
-        logger.info(f"=é Incoming message from {request.user_id} via {request.channel}")
+        logger.info(f"=ï¿½ Incoming message from {request.user_id} via {request.channel}")
 
         # Get or create conversation
         conversation = await supabase_service.get_or_create_conversation(
-            tenant_id=request.tenant_id,
             user_id=request.user_id,
             channel=request.channel
         )
@@ -110,12 +128,10 @@ async def handle_support_message(request: MessageRequest):
         )
 
         # Create agent
-        agent = create_agent(
-            tenant_id=request.tenant_id,
-            conversation_id=conversation_id,
+        agent = create_rag_agent(
             user_id=request.user_id,
-            channel=request.channel,
-            use_checkpointer=True  # Enable state persistence
+            conversation_id=conversation_id,
+            checkpointer=CHECKPOINTER_POSTGRES
         )
 
         # Process message through agent
@@ -186,25 +202,23 @@ async def get_conversation(conversation_id: str):
         )
 
 
-@app.get("/api/v1/tenants/{tenant_id}/conversations")
-async def list_tenant_conversations(tenant_id: str, limit: int = 50):
+@app.get("/api/v1/conversations")
+async def list_conversations(limit: int = 50):
     """
-    List all conversations for a tenant.
+    List all conversations.
 
     Args:
-        tenant_id: Tenant ID
         limit: Maximum number of conversations to return
 
     Returns:
         List of conversations
     """
     try:
-        result = supabase_service.client.table("conversations").select("*").eq(
-            "tenant_id", tenant_id
-        ).order("last_message_at", desc=True).limit(limit).execute()
+        result = supabase_service.client.table("conversations").select("*").order(
+            "last_message_at", desc=True
+        ).limit(limit).execute()
 
         return {
-            "tenant_id": tenant_id,
             "conversations": result.data,
             "total": len(result.data)
         }
@@ -219,9 +233,9 @@ async def list_tenant_conversations(tenant_id: str, limit: int = 50):
 
 if __name__ == "__main__":
     import uvicorn
-
+    
     uvicorn.run(
-        "app.main:app",
+        app,
         host="0.0.0.0",
         port=8000,
         reload=True

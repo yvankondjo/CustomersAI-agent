@@ -20,6 +20,13 @@ class Settings:
     META_GRAPH_VERSION: str = os.getenv("META_GRAPH_VERSION", "v24.0")
     WHATSAPP_REDIRECT_URI: str = os.getenv("WHATSAPP_REDIRECT_URI", "test")
     WHATSAPP_VERIFY_TOKEN: str = os.getenv("WHATSAPP_VERIFY_TOKEN", "tests")
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not SUPABASE_ANON_KEY or not SUPABASE_JWT_SECRET:
         raise ValueError("SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY and SUPABASE_JWT_SECRET environment variables are required")
 

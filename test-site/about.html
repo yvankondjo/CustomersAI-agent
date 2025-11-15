@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>À propos - Site Web de Test</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="header">
+    <div class="container">
+      <div class="logo">
+        <h1>🚀 Ma Boutique</h1>
+      </div>
+      <nav class="nav">
+        <a href="index.html" class="nav-link">Accueil</a>
+        <a href="products.html" class="nav-link">Produits</a>
+        <a href="about.html" class="nav-link active">À propos</a>
+        <a href="contact.html" class="nav-link">Contact</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="content-section">
+      <div class="container">
+        <h2 class="section-title">À propos de nous</h2>
+        <div style="max-width: 800px; margin: 0 auto;">
+          <p style="font-size: 1.1rem; line-height: 1.8; color: #64748b; margin-bottom: 2rem;">
+            Bienvenue sur notre site de démonstration ! Ce site a été créé pour tester l'intégration 
+            du widget de chat AI Support. Vous pouvez naviguer sur les différentes pages et tester 
+            le chatbot en cliquant sur le bouton en bas à droite.
+          </p>
+          <p style="font-size: 1.1rem; line-height: 1.8; color: #64748b;">
+            Le chatbot est entièrement fonctionnel et connecté à notre API backend. Il peut répondre 
+            à vos questions, vous aider à trouver des informations, et même vous permettre de réserver 
+            un rendez-vous si nécessaire.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <p>&copy; 2024 Site Web de Test - AI Support Widget</p>
+    </div>
+  </footer>
+
+  <script src="widget.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      if (window.AISupportWidget) {
+        AISupportWidget.init({
+          baseUrl: 'http://localhost:8000',
+          primaryColor: '#0ea5e9',
+          title: 'Support AI',
+          subtitle: 'Comment puis-je vous aider ?',
+          position: 'bottom-right',
+          showBranding: true
+        });
+      }
+    });
+  </script>
+</body>
+</html>
+

@@ -12,3 +12,5 @@ backend/app/schemas/_pycache_
 backend/app/utils/_pycache_
 backend/app/tests/_pycache_
 backend/app/tests/_pycache_
+.agent/*
+.cursor/*

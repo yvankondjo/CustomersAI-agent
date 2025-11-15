@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Contact - Site Web de Test</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="header">
+    <div class="container">
+      <div class="logo">
+        <h1>🚀 Ma Boutique</h1>
+      </div>
+      <nav class="nav">
+        <a href="index.html" class="nav-link">Accueil</a>
+        <a href="products.html" class="nav-link">Produits</a>
+        <a href="about.html" class="nav-link">À propos</a>
+        <a href="contact.html" class="nav-link active">Contact</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="content-section">
+      <div class="container">
+        <h2 class="section-title">Contactez-nous</h2>
+        <div style="max-width: 600px; margin: 0 auto; background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);">
+          <p style="color: #64748b; margin-bottom: 2rem; text-align: center;">
+            Vous pouvez nous contacter via le chatbot en bas à droite, ou utiliser les informations ci-dessous :
+          </p>
+          <div style="text-align: center;">
+            <p style="margin-bottom: 1rem;"><strong>Email:</strong> contact@example.com</p>
+            <p style="margin-bottom: 1rem;"><strong>Téléphone:</strong> +33 1 23 45 67 89</p>
+            <p><strong>Adresse:</strong> 123 Rue de la Démo, 75000 Paris</p>
+          </div>
+          <div style="text-align: center; margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #e5e7eb;">
+            <p style="color: #0ea5e9; font-weight: 600;">💡 Astuce : Utilisez le chatbot pour une réponse instantanée !</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <p>&copy; 2024 Site Web de Test - AI Support Widget</p>
+    </div>
+  </footer>
+
+  <script src="widget.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      if (window.AISupportWidget) {
+        AISupportWidget.init({
+          baseUrl: 'http://localhost:8000',
+          primaryColor: '#0ea5e9',
+          title: 'Support AI',
+          subtitle: 'Comment puis-je vous aider ?',
+          position: 'bottom-right',
+          showBranding: true
+        });
+      }
+    });
+  </script>
+</body>
+</html>
+

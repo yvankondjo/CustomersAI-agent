@@ -2,7 +2,10 @@ import logging
 import operator
 import json
 import os
+import asyncio
 from typing import List, Dict, Any, Optional, Literal, Annotated
+from datetime import datetime
+from uuid import uuid4
 
 from langchain_core.messages import (
     HumanMessage,
@@ -13,7 +16,7 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from mistralai import Mistral
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import RemoveMessage, REMOVE_ALL_MESSAGES, add_messages
@@ -22,236 +25,351 @@ from psycopg import connect
 from psycopg.rows import dict_row
 
 from app.deps.runtime_prod import CHECKPOINTER_POSTGRES
-from app.deps.runtime_test import CHECKPOINTER_REDIS
-from app.services.escalation import Escalation
-from app.services.find_answers import FindAnswers
-from app.services.retriever import Retriever
+from app.core.constants import DEFAULT_USER_ID
+from app.db.session import get_db
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 
-class QueryItem(BaseModel):
-    query: str = Field(..., description="The query to search for")
-    lang: Literal["french", "english", "spanish"] = Field(
-        default="french", description="The language to search for"
-    )
-
-
-def create_find_answers_tool(user_id: str):
-    """Factory function to create find_answers tool with user_id"""
-    find_answers_service = FindAnswers(user_id)
-
-    @tool
-    def find_answers(question: str) -> dict:
-        """
-        Find the answers to the given user question
-        Args:
-            question: str the question to find the answers to
-        Returns:
-            dict: The answer to the question as a dictionary
-        """
-        answer = find_answers_service.find_answers(question)
-        return answer.model_dump()
-
-    return find_answers
-
-
-def create_search_files_tool(user_id: str):
-    """Factory function to create search_files tool with user_id"""
-    retriever = Retriever(user_id)
-
-    @tool
-    def search_files(queries: List[QueryItem]) -> List[str]:
-        """
-        Search the documents for the given query
-
-        Args:
-            queries: List of query items to search for
-
-        Returns:
-            List of search results
-        """
-        all_results = []
-        queries_list = queries if isinstance(queries, list) else [queries]
-
-        for q in queries_list:
-            try:
-                query_item = q if isinstance(q, QueryItem) else QueryItem(**q)
-            except Exception as e:
-                print(f"Error creating QueryItem from {q}: {e}")
-                continue
-
-            results = retriever.retrieve_from_knowledge_chunks(
-                query_item.query, k=10, type="hybrid", query_lang=query_item.lang
-            )
-            for r in results:
-                all_results.append(r.get("content"))
-        return all_results
-
-    return search_files
-
-
-def create_unified_search_tool(user_id: str, model_name: str = "x-ai/grok-4-fast"):
-    """
-    Factory function to create unified_search tool with user_id.
-
-    This tool replaces the separate find_answers and search_files tools,
-    executing both searches in parallel for optimal performance.
-    """
-    from app.services.unified_search import (
-        UnifiedSearchService,
-        QueryItem as UnifiedQueryItem,
-    )
-
-    service = UnifiedSearchService(user_id, model_name)
-
-    @tool
-    def unified_search(question: str, queries: List[dict]) -> dict:
-        """
-        Unified search across FAQ and knowledge documents.
-
-        This tool automatically searches both FAQ database and document chunks in parallel
-        for optimal performance. It intelligently merges results based on FAQ answer quality.
-
-        The LLM should generate search queries in the appropriate languages based on the
-        doc_lang configuration provided in the system prompt.
-
-        Args:
-            question: The user's original question (exactly as written)
-            queries: List of search queries with languages, e.g.:
-                [
-                    {"query": "billing information", "lang": "english"},
-                    {"query": "plan pricing details", "lang": "english"}
-                ]
-
-        Returns:
-            dict with:
-            - answer_content: The synthesized answer (or None if no answer found)
-            - answer_grade: "full" (complete answer), "partial" (incomplete), or "no-answer"
-            - faq_references: List of FAQ entries that were referenced
-            - doc_chunks: List of relevant document chunks
-            - metadata: Performance metrics (latencies, strategy used, etc.)
-        """
-        try:
-            # Convert dicts to QueryItem objects
-            query_items = [UnifiedQueryItem(**q) for q in queries]
-
-            # Execute parallel search
-            result = service.search(question, query_items)
-
-            return result.model_dump()
-
-        except Exception as e:
-            logger.error(f"❌ Unified search failed: {str(e)}")
-            import traceback
-
-            traceback.print_exc()
+def get_ai_settings_from_db(user_id: str = DEFAULT_USER_ID) -> dict:
+    """Récupérer les paramètres AI depuis la base de données"""
+    try:
+        db = get_db()
+        result = db.table("ai_settings").select("*").eq("user_id", user_id).execute()
+        
+        if result.data:
+            settings = result.data[0]
             return {
-                "answer_content": None,
-                "answer_grade": "no-answer",
-                "faq_references": [],
-                "doc_chunks": [],
-                "metadata": {
-                    "faq_latency": 0,
-                    "docs_latency": 0,
-                    "total_latency": 0,
-                    "strategy_used": "error",
-                    "faq_count": 0,
-                    "docs_count": 0,
-                },
+                "model_name": settings.get("model_name", "mistral-small-2506"),
+                "system_prompt": settings.get("system_prompt", "You are a helpful AI assistant."),
+                "temperature": float(settings.get("temperature", 0.7)),
+                "max_tokens": int(settings.get("max_tokens", 2000)),
+                "top_p": float(settings.get("top_p", 1.0)) if settings.get("top_p") else None,
+                "frequency_penalty": float(settings.get("frequency_penalty", 0.0)) if settings.get("frequency_penalty") else None,
+                "presence_penalty": float(settings.get("presence_penalty", 0.0)) if settings.get("presence_penalty") else None,
             }
+        
+        return {
+            "model_name": "mistral-small-2506",
+            "system_prompt": "You are a helpful AI assistant specialized in customer support. Be friendly, professional, and concise.",
+            "temperature": 0.7,
+            "max_tokens": 2000,
+            "top_p": None,
+            "frequency_penalty": None,
+            "presence_penalty": None,
+        }
+    except Exception as e:
+        logger.error(f"Error loading AI settings from DB: {e}")
+        return {
+            "model_name": "mistral-small-2506",
+            "system_prompt": "You are a helpful AI assistant specialized in customer support. Be friendly, professional, and concise.",
+            "temperature": 0.7,
+            "max_tokens": 2000,
+            "top_p": None,
+            "frequency_penalty": None,
+            "presence_penalty": None,
+        }
 
-    return unified_search
+
+def _get_or_create_event_loop():
+    """Get existing event loop or create a new one"""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Event loop is closed")
+        return loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
 
 
 def create_escalation_tool(user_id: str, conversation_id: str):
-    """Factory function to create escalation tool with user_id"""
-    escalation_service = Escalation(user_id, conversation_id)
+    """Create escalation tool for routing to human support"""
+    from app.services.escalation import Escalation
+
+    escalation_service = Escalation(user_id=user_id, conversation_id=conversation_id)
 
     @tool
-    def escalation(message: str, confidence: float, reason: str) -> EscalationResult:
-        """Escalate the conversation to human support
+    def escalate_to_human(reason: str, summary: str) -> dict:
+        """
+        Escalate the conversation to human support when the AI cannot help.
 
-        This tool creates an escalation record, disables AI mode for the conversation,
-        and sends an email notification to the support team with a secure link to
-        access the conversation.
+        Use this when:
+        - Customer explicitly requests human support
+        - Issue is too complex for AI
+        - Customer is frustrated or angry
+        - Legal, financial, or sensitive matters
 
         Args:
-            message: str the message that triggered the escalation
-            confidence: float the confidence score of the escalation (0-100)
-            reason: str the reason for the escalation
+            reason: Short reason for escalation (e.g., "complex_issue", "customer_request")
+            summary: Brief summary of the customer's issue and conversation context
 
         Returns:
-            EscalationResult: The escalation result with success status and details
+            dict with escalation_id and status
         """
         try:
-            # Run async method in sync context
-            import asyncio
-
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
+            loop = _get_or_create_event_loop()
             escalation_id = loop.run_until_complete(
-                escalation_service.create_escalation(message, confidence, reason)
+                escalation_service.create_escalation(
+                    message=summary,
+                    confidence=0.8,
+                    reason=reason
+                )
             )
 
             if escalation_id:
-                return EscalationResult(
-                    escalated=True,
-                    escalation_id=escalation_id,
-                    reason=f"Escalation créée avec succès. Email envoyé à l'équipe support.",
-                )
+                return {
+                    "status": "success",
+                    "escalation_id": escalation_id,
+                    "message": "Conversation escalated to human support. A team member will contact the customer soon."
+                }
             else:
-                return EscalationResult(
-                    escalated=False,
-                    escalation_id=None,
-                    reason="Échec de création de l'escalation",
-                )
-
+                return {
+                    "status": "error",
+                    "message": "Failed to create escalation. Please try again."
+                }
         except Exception as e:
-            logger.error(f"Erreur lors de l'escalation: {e}")
-            import traceback
+            logger.error(f"Escalation tool error: {e}")
+            return {"status": "error", "message": str(e)}
 
-            traceback.print_exc()
-            return EscalationResult(
-                escalated=False,
-                escalation_id=None,
-                reason=f"Erreur technique: {str(e)}",
+    return escalate_to_human
+
+
+def create_check_availability_tool(user_id: str, conversation_id: str):
+    """Create tool to check available appointment slots"""
+    from app.services.booking import BookingService
+
+    booking_service = BookingService(user_id=user_id, conversation_id=conversation_id)
+
+    @tool
+    def check_availability(start_date: str, end_date: str, timezone: str = "Europe/Paris") -> dict:
+        """
+        Check available time slots for booking appointments.
+
+        Args:
+            start_date: Start date in ISO 8601 format (e.g., "2025-11-20T00:00:00Z")
+            end_date: End date in ISO 8601 format (e.g., "2025-11-21T00:00:00Z")
+            timezone: Timezone for the slots (default: "Europe/Paris")
+
+        Returns:
+            dict with available_slots: list of time slots with start/end times
+        """
+        try:
+            # Check if Cal.com is configured
+            cal_api_key = os.getenv("CAL_API_KEY")
+            cal_event_type_id = os.getenv("CAL_EVENT_TYPE_ID")
+
+            if not cal_api_key or not cal_event_type_id:
+                return {
+                    "available_slots": [],
+                    "count": 0,
+                    "error": "cal_not_configured",
+                    "message": "Appointment booking is not configured yet. Please ask the user to connect their Cal.com account first."
+                }
+
+            loop = _get_or_create_event_loop()
+            slots = loop.run_until_complete(
+                booking_service.check_availability(
+                    start_date=start_date,
+                    end_date=end_date,
+                    timezone=timezone
+                )
             )
 
-    return escalation
+            return {
+                "available_slots": [{"start": slot.start, "end": slot.end} for slot in slots],
+                "count": len(slots)
+            }
+        except Exception as e:
+            logger.error(f"Check availability error: {e}")
+            return {"available_slots": [], "count": 0, "error": str(e)}
+
+    return check_availability
 
 
-class EscalationResult(BaseModel):
-    """Result of an escalation"""
+def create_booking_tool(user_id: str, conversation_id: str):
+    """Create tool to book appointments"""
+    from app.services.booking import BookingService
 
-    escalated: bool
-    escalation_id: Optional[str] = None
-    reason: str
+    booking_service = BookingService(user_id=user_id, conversation_id=conversation_id)
+
+    @tool
+    def create_booking(
+        attendee_name: str,
+        attendee_email: str,
+        start_time: str,
+        duration_minutes: int = 30,
+        attendee_phone: str = None,
+        timezone: str = "Europe/Paris"
+    ) -> dict:
+        """
+        Create an appointment booking.
+
+        **CRITICAL**: This tool MUST ONLY be called AFTER:
+        1. Calling check_availability to get available slots
+        2. Verifying that start_time is in the available_slots list returned by check_availability
+        3. Confirming with the customer that they want to book this specific time slot
+
+        **NEVER** call this tool without first verifying availability. If you call this tool with a time that wasn't verified as available, the booking may fail.
+
+        Args:
+            attendee_name: Customer's full name
+            attendee_email: Customer's email address
+            start_time: Booking start time in ISO 8601 UTC format (e.g., "2025-11-20T14:00:00Z"). MUST be from available_slots.
+            duration_minutes: Meeting duration in minutes (default: 30)
+            attendee_phone: Optional phone number in international format (e.g., "+33612345678")
+            timezone: Customer's timezone (default: "Europe/Paris")
+
+        Returns:
+            dict with booking details including meeting_url and scheduled_at
+        """
+        try:
+            # Check if Cal.com is configured
+            cal_api_key = os.getenv("CAL_API_KEY")
+            cal_event_type_id = os.getenv("CAL_EVENT_TYPE_ID")
+
+            if not cal_api_key or not cal_event_type_id:
+                return {
+                    "status": "error",
+                    "message": "Appointment booking is not configured yet. Please ask the user to connect their Cal.com account first."
+                }
+
+            loop = _get_or_create_event_loop()
+            result = loop.run_until_complete(
+                booking_service.create_booking(
+                    attendee_name=attendee_name,
+                    attendee_email=attendee_email,
+                    start_time=start_time,
+                    duration_minutes=duration_minutes,
+                    attendee_phone=attendee_phone,
+                    timezone=timezone
+                )
+            )
+
+            if result.success:
+                return {
+                    "status": "success",
+                    "booking_id": result.booking_id,
+                    "meeting_url": result.meeting_url,
+                    "scheduled_at": result.scheduled_at,
+                    "message": f"Appointment booked successfully for {attendee_name}"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": result.error_message or "Failed to create booking"
+                }
+        except Exception as e:
+            logger.error(f"Create booking error: {e}")
+            return {"status": "error", "message": str(e)}
+
+    return create_booking
+
+
+def create_search_tool(user_id: str):
+    from app.services.rag import rag_service
+    from app.services.ingest_helper import get_embedding
+    from mistralai import Mistral
+
+    mistral_client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+
+    @tool
+    def search(search_query: str) -> dict:
+        """
+        Search the knowledge base for relevant information.
+
+        Args:
+            search_query: The text to search for in the knowledge base
+
+        Returns:
+            dict with:
+            - chunks: List of relevant text chunks (max 3 after reranking)
+        """
+        try:
+            qdrant = rag_service._get_client()
+            
+            loop = _get_or_create_event_loop()
+            embedding = loop.run_until_complete(get_embedding(search_query))
+            
+            results = qdrant.search(
+                collection_name="knowledge_base",
+                query_vector=embedding,
+                limit=10,
+                query_filter={
+                    "must": [
+                        {"key": "user_id", "match": {"value": user_id}}
+                    ]
+                }
+            )
+
+            chunks = [
+                {
+                    "content": hit.payload.get("content", ""),
+                    "score": hit.score,
+                    "metadata": hit.payload.get("metadata", {})
+                }
+                for hit in results
+            ]
+
+            if not chunks:
+                return {"chunks": []}
+
+            if len(chunks) <= 3:
+                return {"chunks": [c["content"] for c in chunks]}
+
+            chunks_text = "\n\n".join([
+                f"[{i}] {chunk['content'][:300]}"
+                for i, chunk in enumerate(chunks)
+            ])
+
+            rerank_prompt = f"""Given the user question and these text chunks, rank them by relevance.
+Return ONLY a JSON array of the top 3 most relevant chunk indices: [0, 2, 5]
+
+Question: {search_query}
+
+Chunks:
+{chunks_text}
+
+Return ONLY a JSON array of indices:"""
+
+            rerank_response = mistral_client.chat.complete(
+                model="mistral-small-2506",
+                messages=[{"role": "user", "content": rerank_prompt}],
+                temperature=0.1
+            )
+
+            import json
+            try:
+                indices = json.loads(rerank_response.choices[0].message.content)
+                selected_chunks = [chunks[i]["content"] for i in indices[:3] if i < len(chunks)]
+            except:
+                selected_chunks = [chunks[i]["content"] for i in range(3)]
+
+            return {"chunks": selected_chunks}
+
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"chunks": []}
+
+    return search
+
+
 
 
 class RAGAgentState(BaseModel):
     messages: Annotated[List[AnyMessage], add_messages]
     search_results: List[str] = []
     n_search: int = 0
-    find_answers_results: List[dict] = []
-    n_find_answers: int = 0
     max_searches: int = 5
-    max_find_answers: int = 5
     error_message: Optional[str] = None
     trim_strategy: Literal["none", "hard", "summary"] = "summary"
     max_tokens: int = 8000
-    escalation_result: EscalationResult = EscalationResult(
-        escalated=False, escalation_id=None, reason=""
-    )
-    guardrail_pre_result: Optional[dict] = None
-    should_respond: bool = True
-    retry_count: int = 0
 
 
 class RAGAgent:
@@ -261,14 +379,13 @@ class RAGAgent:
         self,
         user_id: str,
         conversation_id: str,
-        model_name: str = "gpt-4o-mini",
-        summarization_model_name: str = "gpt-4o-mini",
+        model_name: str = "mistral-small-2506",
+        summarization_model_name: str = "mistral-small-2506",
         summarization_max_tokens: int = 300,
         system_prompt: str = "",
         max_searches: int = 3,
         trim_strategy: Literal["none", "hard", "summary"] = "summary",
         max_tokens: int = 8000,
-        max_find_answers: int = 5,
         test_mode: bool = False,
         checkpointer=None,
     ):
@@ -278,32 +395,28 @@ class RAGAgent:
         self.max_searches = max_searches
         self.trim_strategy = trim_strategy
         self.max_tokens = max_tokens
-        self.max_find_answers = max_find_answers
         self.max_tokens_before_summary = int(max_tokens * 0.8)
         self.summarization_model_name = summarization_model_name
         self.summarization_max_tokens = summarization_max_tokens
 
         self.init_system_prompt = False
-        self.llm = ChatOpenAI(
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            base_url=os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
-            model=model_name,
-        )
+        self.mistral_client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+        self.model_name = model_name
+        self.summarization_model_name = summarization_model_name
 
-        self.sum_llm = ChatOpenAI(
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            base_url=os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
-            model=summarization_model_name,
-        )
+        # Create tools
+        self.search_tool = create_search_tool(user_id)
 
-        self.unified_search_tool = create_unified_search_tool(user_id, model_name)
-        self.tools = [self.unified_search_tool]
-
+        # Only add action tools (escalation, booking) if not in test mode
         if not test_mode:
             self.escalation_tool = create_escalation_tool(user_id, conversation_id)
-            self.tools.append(self.escalation_tool)
+            self.check_availability_tool = create_check_availability_tool(user_id, conversation_id)
+            self.booking_tool = create_booking_tool(user_id, conversation_id)
+            self.tools = [self.search_tool, self.escalation_tool, self.check_availability_tool, self.booking_tool]
+        else:
+            self.tools = [self.search_tool]
 
-        self.llm_with_tools = self.llm.bind_tools(self.tools)
+        self.tools_schema = [tool.args_schema.schema() if hasattr(tool, 'args_schema') else {} for tool in self.tools]
         if not system_prompt or system_prompt.strip() == "":
             from app.deps.system_prompt import SYSTEM_PROMPT
 
@@ -314,276 +427,48 @@ class RAGAgent:
 
         self.system_prompt = [SystemMessage(content=system_prompt)]
 
-        if test_mode:
-            self.checkpointer = CHECKPOINTER_REDIS
+        if checkpointer is None:
+            self.checkpointer = None
         else:
-            self.checkpointer = CHECKPOINTER_POSTGRES
+            self.checkpointer = checkpointer
+        self.conversation_id = conversation_id
 
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
-        """Build the LangGraph workflow with history management and guardrails"""
+        """Build simple LangGraph workflow: question → llm → tool if needed → response"""
         graph = StateGraph(RAGAgentState)
 
-        # Add nodes
-        graph.add_node("guardrails_pre_check", self._guardrails_pre_check)
         graph.add_node("llm", self._call_llm)
         graph.add_node("handle_tool_call", self._handle_tool_call)
-        graph.add_node("guardrails_post_check", self._guardrails_post_check)
-        graph.add_node("error_handler", self._error_handler)
 
-        # Entry point: pre-validation
-        graph.set_entry_point("guardrails_pre_check")
+        graph.set_entry_point("llm")
 
-        # Pre-check → llm (if safe) or error_handler (if flagged)
-        graph.add_conditional_edges(
-            "guardrails_pre_check",
-            self._guardrails_pre_decision,
-            {"proceed": "llm", "block": "error_handler"},
-        )
-
-        # LLM → Check for errors first, then tool_call or post_check
         graph.add_conditional_edges(
             "llm",
-            self._check_llm_result,
+            self._check_tool_call,
             {
-                "error": "error_handler",
                 "tool_call": "handle_tool_call",
-                "end": "guardrails_post_check",
+                "end": END,
             },
         )
 
-        # Tool calls loop back to llm
         graph.add_edge("handle_tool_call", "llm")
 
-        # Post-check → Check if response should be sent or blocked
-        graph.add_conditional_edges(
-            "guardrails_post_check",
-            self._check_should_respond,
-            {"blocked": "error_handler", "ok": END},
-        )
-
-        # Error handler → END (silent failure)
-        graph.add_edge("error_handler", END)
-
-        if self.checkpointer:
+        if self.checkpointer is not None:
+            logger.info(f"Compiling graph WITH checkpointer for conversation {self.conversation_id}")
             return graph.compile(checkpointer=self.checkpointer)
         else:
+            logger.info(f"Compiling graph WITHOUT checkpointer for conversation {self.conversation_id}")
             return graph.compile()
 
-    def _guardrails_pre_check(self, state: RAGAgentState) -> Dict[str, Any]:
-        """Pre-validation: Check incoming message with OpenAI Moderation + custom guardrails
-        If flagged → Block response (silent, no AI message generated)
-        """
-        try:
-            from app.services.ai_decision_service import AIDecisionService
-
-            last_user_message = (
-                state.messages[-1].content
-                if isinstance(state.messages[-1], HumanMessage)
-                else None
-            )
-
-            if not last_user_message:
-                return {}
-
-            if isinstance(last_user_message, list):
-
-                text_parts = [
-                    part.get("text", "")
-                    for part in last_user_message
-                    if isinstance(part, dict) and part.get("type") == "text"
-                ]
-                message_text = " ".join(text_parts).strip()
-                message_content = last_user_message
-            else:
-
-                message_text = str(last_user_message)
-                message_content = None
-
-            if not message_text:
-                return {}
-
-            decision_service = AIDecisionService(self.user_id)
-            decision, confidence, reason, matched_rule = decision_service.check_message(
-                message_text, context_type="chat", message_content=message_content
-            )
-
-            decision_log = decision_service.log_decision(
-                message_id=None,
-                message_text=message_text,
-                decision=decision,
-                confidence=confidence,
-                reason=reason,
-                matched_rule=matched_rule,
-            )
-            logger.debug(
-                f"[GUARDRAILS PRE] Decision logged: {decision_log.get('id') if decision_log else 'failed'}"
-            )
-
-            if decision.value == "ignore":
-                logger.warning(
-                    f"[GUARDRAILS PRE] Message flagged and blocked: {reason}"
-                )
-
-                return {
-                    "guardrail_pre_result": {
-                        "decision": "block",
-                        "reason": reason,
-                        "confidence": confidence,
-                        "escalated": True,
-                    },
-                    "should_respond": False,
-                    "error_message": f"GUARDRAIL_PRE_BLOCKED: {reason}",
-                }
-
-            return {
-                "guardrail_pre_result": {
-                    "decision": "proceed",
-                    "reason": "Message passed guardrails",
-                    "confidence": confidence,
-                }
-            }
-
-        except Exception as e:
-            logger.error(f"Error in guardrails_pre_check: {e}")
-            return {}
-
-    def _guardrails_pre_decision(self, state: RAGAgentState) -> str:
-        """Decision point: proceed or block based on pre-check"""
-        result = getattr(state, "guardrail_pre_result", None)
-
-        if result and result.get("decision") == "block":
-            logger.info(f"[GUARDRAILS] Blocking message: {result.get('reason')}")
-            return "block"
-
-        return "proceed"
-
-    def _check_llm_result(self, state: RAGAgentState) -> str:
-        """Check if LLM call resulted in error or should continue normally"""
-        # Check for LLM errors
-        if not state.should_respond:
-            if state.error_message and "LLM_ERROR" in state.error_message:
-                return "error"
-
-        # Check for tool calls
+    def _check_tool_call(self, state: RAGAgentState) -> str:
+        """Check if LLM wants to call a tool or return final response"""
         last_message = state.messages[-1] if state.messages else None
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            logger.debug(
-                f"[LLM RESULT] Found {len(last_message.tool_calls)} tool calls"
-            )
             return "tool_call"
-
-        # Normal end - proceed to post-check
         return "end"
 
-    def _check_should_respond(self, state: RAGAgentState) -> str:
-        """Check if post-guardrail blocked the response"""
-        if not state.should_respond:
-            if state.error_message and "GUARDRAIL_POST_BLOCKED" in state.error_message:
-                logger.info(
-                    f"[GUARDRAILS POST] Response blocked, routing to error handler"
-                )
-                return "blocked"
-
-        return "ok"
-
-    def _guardrails_post_check(self, state: RAGAgentState) -> Dict[str, Any]:
-        """Post-validation: Check generated response safety
-        If unsafe → Remove AI response + triggering user message from context (silent blocking)
-        """
-        try:
-            from app.services.ai_decision_service import AIDecisionService
-
-            # Find last AI message and its index
-            last_ai_message = None
-            last_ai_msg_obj = None
-            last_ai_index = None
-
-            for i in range(len(state.messages) - 1, -1, -1):
-                msg = state.messages[i]
-                if isinstance(msg, AIMessage):
-                    if hasattr(msg, "content") and isinstance(msg.content, str):
-                        last_ai_message = msg.content
-                        last_ai_msg_obj = msg
-                        last_ai_index = i
-                        break
-
-            if not last_ai_message or last_ai_msg_obj is None:
-                return {}
-
-            decision_service = AIDecisionService(self.user_id)
-            moderation_result = decision_service._check_openai_moderation(
-                last_ai_message
-            )
-
-            if moderation_result.get("flagged"):
-                logger.warning(
-                    f"[GUARDRAILS POST] Generated response flagged: {moderation_result.get('reason')}"
-                )
-
-                if not last_ai_msg_obj.id:
-                    logger.error(
-                        f"[GUARDRAILS POST] AI message has no ID, cannot remove from context"
-                    )
-                    return {
-                        "should_respond": False,
-                        "error_message": f"GUARDRAIL_POST_BLOCKED: {moderation_result.get('reason')}",
-                    }
-
-                messages_to_remove = [RemoveMessage(id=last_ai_msg_obj.id)]
-
-                for i in range(last_ai_index - 1, -1, -1):
-                    if isinstance(state.messages[i], HumanMessage):
-                        if state.messages[i].id:
-                            messages_to_remove.append(
-                                RemoveMessage(id=state.messages[i].id)
-                            )
-                            logger.info(
-                                f"[GUARDRAILS POST] Removing triggering user message from context"
-                            )
-                        else:
-                            logger.warning(
-                                f"[GUARDRAILS POST] User message has no ID, cannot remove from context"
-                            )
-                        break
-
-                return {
-                    "messages": messages_to_remove,
-                    "should_respond": False,
-                    "error_message": f"GUARDRAIL_POST_BLOCKED: {moderation_result.get('reason')}",
-                }
-
-            return {}
-
-        except Exception as e:
-            logger.error(f"Error in guardrails_post_check: {e}")
-            return {}
-
-    def _error_handler(self, state: RAGAgentState) -> Dict[str, Any]:
-        """Handle errors and guardrail blocks silently
-        Logs the issue but does not generate any user-facing message
-        """
-        error_msg = state.error_message or "Unknown error"
-
-        if "GUARDRAIL_PRE_BLOCKED" in error_msg:
-            logger.info(
-                f"[SILENT FAILURE] Pre-guardrail blocked message for user {self.user_id}"
-            )
-        elif "GUARDRAIL_POST_BLOCKED" in error_msg:
-            logger.info(
-                f"[SILENT FAILURE] Post-guardrail blocked response for user {self.user_id}"
-            )
-        elif "LLM_ERROR" in error_msg:
-            logger.error(
-                f"[SILENT FAILURE] LLM error for user {self.user_id}: {error_msg}"
-            )
-        else:
-            logger.warning(
-                f"[SILENT FAILURE] Unknown error type for user {self.user_id}: {error_msg}"
-            )
-
-        return {}
 
     def _manage_history(
         self,
@@ -641,13 +526,15 @@ class RAGAgent:
                     )
                 )
 
-                summary_response = self.sum_llm.invoke(
-                    [HumanMessage(content=summary_prompt)],
-                    max_tokens=self.summarization_max_tokens,
+                summary_response = self.mistral_client.chat.complete(
+                    model=self.summarization_model_name,
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=self.summarization_max_tokens
                 )
+                summary_content = summary_response.choices[0].message.content
 
                 summary_system = SystemMessage(
-                    content=f"[PREVIOUS CONVERSATION SUMMARY]\n{summary_response.content}\n[END SUMMARY]"
+                    content=f"[PREVIOUS CONVERSATION SUMMARY]\n{summary_content}\n[END SUMMARY]"
                 )
 
                 new_messages = system_messages + [summary_system] + TAIL_MESSAGES
@@ -657,12 +544,98 @@ class RAGAgent:
         except Exception as e:
             return [AIMessage(content=f"Error in history management: {str(e)}")]
 
-    def _call_llm(self, state: RAGAgentState) -> Dict[str, Any]:
-        """Call the LLM with trimming soft and silent retry on errors"""
-        MAX_RETRIES = 3
-        RETRY_DELAY = 2  # seconds
+    def _convert_messages_to_mistral(self, messages: List[AnyMessage]) -> List[Dict[str, Any]]:
+        """Convert LangChain messages to Mistral API format"""
+        from langgraph.graph.message import RemoveMessage
 
+        system_contents: List[str] = []
+        ordered_messages: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            if isinstance(msg, RemoveMessage):
+                continue
+            if isinstance(msg, SystemMessage):
+                if msg.content:
+                    system_contents.append(msg.content)
+                continue
+            if isinstance(msg, HumanMessage):
+                ordered_messages.append({"role": "user", "content": msg.content})
+                continue
+            if isinstance(msg, AIMessage):
+                content = msg.content if isinstance(msg.content, str) else json.dumps(msg.content)
+                mistral_msg: Dict[str, Any] = {"role": "assistant", "content": content}
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    normalized_calls = []
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            call_id = tc.get("id")
+                            call_name = tc.get("name", "")
+                            call_args = tc.get("args", {})
+                        else:
+                            call_id = getattr(tc, "id", None)
+                            call_name = getattr(tc, "name", "")
+                            call_args = getattr(tc, "args", {})
+                        if not call_id:
+                            call_id = f"tool_call_{uuid4().hex}"
+                        normalized_calls.append(
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": call_name,
+                                    "arguments": json.dumps(call_args or {}),
+                                },
+                            }
+                        )
+                    if normalized_calls:
+                        mistral_msg["tool_calls"] = normalized_calls
+                ordered_messages.append(mistral_msg)
+                continue
+            if isinstance(msg, ToolMessage):
+                tool_entry: Dict[str, Any] = {
+                    "role": "tool",
+                    "content": msg.content,
+                    "name": getattr(msg, "name", ""),
+                }
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                if tool_call_id:
+                    tool_entry["tool_call_id"] = str(tool_call_id)
+                ordered_messages.append(tool_entry)
+
+        final_messages: List[Dict[str, Any]] = []
+        if system_contents:
+            combined_system = "\n\n".join(
+                [content.strip() for content in system_contents if content and content.strip()]
+            )
+            if combined_system:
+                final_messages.append({"role": "system", "content": combined_system})
+
+        for entry in ordered_messages:
+            if entry["role"] == "system":
+                if final_messages and final_messages[0]["role"] == "system":
+                    final_messages[0]["content"] += f"\n\n{entry.get('content', '')}"
+                else:
+                    final_messages.insert(0, {"role": "system", "content": entry.get("content", "")})
+                continue
+            final_messages.append(entry)
+
+        if not final_messages:
+            base_prompt = self.system_prompt[0].content if self.system_prompt else "You are a helpful AI assistant."
+            return [{"role": "system", "content": base_prompt}]
+
+        first_role = final_messages[0]["role"]
+        if first_role not in ("system", "user"):
+            base_prompt = self.system_prompt[0].content if self.system_prompt else "You are a helpful AI assistant."
+            final_messages.insert(0, {"role": "system", "content": base_prompt})
+
+        return final_messages
+
+    def _call_llm(self, state: RAGAgentState) -> Dict[str, Any]:
+        """Call Mistral API directly with tool support"""
         try:
+            from langgraph.graph.message import RemoveMessage
+            
             messages = state.messages.copy()
             if self.system_prompt and not self.init_system_prompt:
                 self.init_system_prompt = True
@@ -671,54 +644,56 @@ class RAGAgent:
             trimmed_messages = self._manage_history(
                 messages, self.trim_strategy, self.max_tokens
             )
+            
+            remove_messages = [m for m in (trimmed_messages or []) if isinstance(m, RemoveMessage)]
             llm_input = trimmed_messages if trimmed_messages else messages
 
-            # Retry logic with exponential backoff
-            last_error = None
-            for attempt in range(MAX_RETRIES):
-                try:
-                    # CRITICAL FIX: Use llm_with_tools to allow tool calls
-                    # Only use structured_llm for final response (when no tools needed)
-                    response = self.llm_with_tools.invoke(llm_input)
+            mistral_messages = self._convert_messages_to_mistral(llm_input)
 
-                    # Success - reset retry count if needed
-                    if attempt > 0:
-                        logger.info(
-                            f"[LLM RETRY] Success on attempt {attempt + 1}/{MAX_RETRIES}"
-                        )
+            tools = []
+            for tool in self.tools:
+                tool_def = {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.args_schema.schema() if hasattr(tool, 'args_schema') else {}
+                    }
+                }
+                tools.append(tool_def)
 
-                    # Return the raw AI message (might contain tool_calls)
-                    return {"messages": [response], "retry_count": 0}
+            response = self.mistral_client.chat.complete(
+                model=self.model_name,
+                messages=mistral_messages,
+                tools=tools if tools else None,
+                tool_choice="auto" if tools else None
+            )
 
-                except Exception as retry_error:
-                    last_error = retry_error
-                    logger.warning(
-                        f"[LLM RETRY] Attempt {attempt + 1}/{MAX_RETRIES} failed: {str(retry_error)}"
-                    )
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            tool_calls = []
 
-                    if attempt < MAX_RETRIES - 1:
-                        # Wait before retrying (exponential backoff)
-                        import time
+            if choice.message.tool_calls:
+                for tc in choice.message.tool_calls:
+                    tool_calls.append({
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "args": json.loads(tc.function.arguments)
+                    })
 
-                        time.sleep(RETRY_DELAY * (2**attempt))
-                    else:
-                        # Max retries reached
-                        logger.error(
-                            f"[LLM ERROR] Max retries ({MAX_RETRIES}) reached for user {self.user_id}: {str(last_error)}"
-                        )
+            ai_message = AIMessage(content=content)
+            if tool_calls:
+                ai_message.tool_calls = tool_calls
 
-            # All retries failed - return silent failure
-            return {
-                "should_respond": False,
-                "error_message": f"LLM_ERROR: {str(last_error)}",
-                "retry_count": MAX_RETRIES,
-            }
+            result_messages = remove_messages + [ai_message] if remove_messages else [ai_message]
+            return {"messages": result_messages}
 
         except Exception as e:
-            logger.error(
-                f"[LLM ERROR] Critical error in _call_llm for {self.user_id}: {e}"
-            )
-            return {"should_respond": False, "error_message": f"LLM_ERROR: {str(e)}"}
+            logger.error(f"Error in _call_llm: {e}")
+            import traceback
+            traceback.print_exc()
+            error_msg = AIMessage(content=f"Désolé, une erreur s'est produite: {str(e)}")
+            return {"messages": [error_msg]}
 
     def _handle_tool_call(self, state: RAGAgentState) -> Dict[str, Any]:
         """Handle the tool call"""
@@ -728,21 +703,20 @@ class RAGAgent:
             tool_call = tool_calls[0]
             tool_name = tool_call.get("name")
 
-            if tool_name == "unified_search":
-                return self._unified_search(state)
-            elif tool_name == "search_files":
-                # Legacy support (will be removed after migration)
-                return self._search_files(state)
-            elif tool_name == "find_answers":
-                # Legacy support (will be removed after migration)
-                return self._find_answers(state)
-            elif tool_name == "escalation":
-                return self._escalation(state)
+            # Route to appropriate handler
+            if tool_name == "search":
+                return self._search(state)
+            elif tool_name == "escalate_to_human":
+                return self._escalate(state)
+            elif tool_name == "check_availability":
+                return self._check_availability(state)
+            elif tool_name == "create_booking":
+                return self._create_booking(state)
             else:
                 return {
                     "messages": [
                         ToolMessage(
-                            content=json.dumps({"error": "Unknown tool"}),
+                            content=json.dumps({"error": f"Unknown tool: {tool_name}"}),
                             tool_call_id=tool_call.get("id"),
                             name=tool_call.get("name"),
                         )
@@ -755,11 +729,15 @@ class RAGAgent:
                 "error_message": str(e),
             }
 
-    def _unified_search(self, state: RAGAgentState) -> Dict[str, Any]:
+    def _search(self, state: RAGAgentState) -> Dict[str, Any]:
         """
         Execute unified search (parallel FAQ + documents search).
         This is an async tool, so we need to run it in an event loop.
         """
+        tool_call_id = None
+        tool_name = None
+        tool_call = None
+        
         last_message = state.messages[-1]
         tool_calls = getattr(last_message, "tool_calls", [])
 
@@ -776,277 +754,442 @@ class RAGAgent:
 
         tool_call = tool_calls[0]
         try:
-            tool_name = tool_call.get("name")
-            tool_call_id = tool_call.get("id")
-            tool_args = tool_call.get("args", {})
+            if isinstance(tool_call, dict):
+                tool_name = tool_call.get("name")
+                tool_call_id = tool_call.get("id")
+                tool_args = tool_call.get("args", {})
+            else:
+                tool_name = getattr(tool_call, "name", None)
+                tool_call_id = getattr(tool_call, "id", None)
+                tool_args = getattr(tool_call, "args", {})
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
 
-            logger.info(f"🔍 Executing unified_search with args: {tool_args}")
+            if not tool_call_id:
+                logger.warning("⚠️ Tool call ID not found, generating one")
+                tool_call_id = f"search_{datetime.now().timestamp()}"
 
-            results = self.unified_search_tool.invoke(tool_args)
+            logger.info(f"🔍 Executing search with args: {tool_args}")
 
-            logger.info(
-                f"✅ Unified search completed: grade={results.get('answer_grade')}, "
-                f"strategy={results.get('metadata', {}).get('strategy_used')}"
-            )
+            results = self.search_tool.invoke(tool_args)
+
+            logger.info(f"✅ Search completed: found {len(results.get('chunks', []))} chunks")
 
             content = json.dumps(results, ensure_ascii=False)
 
             tool_message = ToolMessage(
-                content=content, tool_call_id=tool_call_id, name=tool_name
+                content=content, tool_call_id=tool_call_id, name=tool_name or "search"
             )
 
             return {
                 "messages": [tool_message],
                 "n_search": state.n_search + 1,
-                "search_results": results.get("doc_chunks", []),
-                "find_answers_results": (
-                    [results] if results.get("faq_references") else []
-                ),
+                "search_results": results.get("chunks", []),
             }
 
         except Exception as e:
-            logger.error(f"❌ Error in _unified_search: {str(e)}")
+            logger.error(f"❌ Error in _search: {str(e)}")
             import traceback
 
             traceback.print_exc()
 
+            if not tool_call_id and tool_call:
+                if isinstance(tool_call, dict):
+                    tool_call_id = tool_call.get("id")
+                    tool_name = tool_call.get("name")
+                else:
+                    tool_call_id = getattr(tool_call, "id", None)
+                    tool_name = getattr(tool_call, "name", None)
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                tool_call_id = f"search_error_{datetime.now().timestamp()}"
+
             error_content = json.dumps({"error": str(e)})
             tool_message = ToolMessage(
-                content=error_content, tool_call_id=tool_call_id, name=tool_name
+                content=error_content, tool_call_id=tool_call_id, name=tool_name or "search"
             )
             return {
                 "messages": [tool_message],
                 "error_message": str(e),
             }
 
-    # def _find_answers(self, state: RAGAgentState) -> Dict[str, Any]:
-    #     """Execute the find answers (LEGACY - use unified_search instead)"""
-
-    #     last_message = state.messages[-1]
-    #     tool_calls = getattr(last_message, "tool_calls", [])
-
-    #     if not tool_calls:
-    #         return {
-    #             "messages": [
-    #                 ToolMessage(
-    #                     content=json.dumps({"error": "No tool calls found"}),
-    #                     tool_call_id=None,
-    #                     name=None,
-    #                 )
-    #             ],
-    #             "n_find_answers": state.n_find_answers,
-    #         }
-
-    #     tool_messages = []
-    #     find_answers_results: List[dict] = []
-
-    #     tool_call = tool_calls[0]
-    #     try:
-    #         tool_name = tool_call.get("name")
-    #         tool_call_id = tool_call.get("id")
-    #         tool_args = tool_call.get("args", {})
-
-    #         if state.n_find_answers >= state.max_find_answers:
-    #             return {
-    #                 "messages": [
-    #                     ToolMessage(
-    #                         content=json.dumps({"error": "Max find answers reached"}),
-    #                         tool_call_id=tool_call_id,
-    #                         name=tool_name,
-    #                     )
-    #                 ],
-    #                 "n_find_answers": state.n_find_answers,
-    #             }
-    #         question = tool_args.get("question", "")
-    #         results = self.find_answers_tool.invoke({"question": question})
-
-    #         content = json.dumps(
-    #             {"results": results, "question": question}, ensure_ascii=False
-    #         )
-    #         find_answers_results.append(results)
-
-    #         tool_message = ToolMessage(
-    #             content=content, tool_call_id=tool_call_id, name=tool_name
-    #         )
-    #         tool_messages.append(tool_message)
-
-    #     except Exception as e:
-    #         error_content = json.dumps({"error": str(e)})
-    #         tool_message = ToolMessage(
-    #             content=error_content, tool_call_id=tool_call_id, name=tool_name
-    #         )
-    #         tool_messages.append(tool_message)
-
-    #     return {
-    #         "messages": tool_messages,
-    #         "n_find_answers": state.n_find_answers + 1,
-    #         "find_answers_results": find_answers_results,
-    #     }
-
-    # def _search_files(self, state: RAGAgentState) -> Dict[str, Any]:
-    #     """Execute the search"""
-
-    #     last_message = state.messages[-1]
-    #     tool_calls = getattr(last_message, "tool_calls", [])
-
-    #     if not tool_calls:
-    #         return {
-    #             "messages": [
-    #                 ToolMessage(
-    #                     content=json.dumps({"error": "No tool calls found"}),
-    #                     tool_call_id=None,
-    #                     name=None,
-    #                 )
-    #             ],
-    #             "n_search": state.n_search,
-    #         }
-
-    #     tool_messages = []
-    #     search_results: List[str] = []
-
-    #     tool_call = tool_calls[0]
-    #     try:
-    #         tool_name = tool_call.get("name")
-    #         tool_args = tool_call.get("args", {})
-
-    #         if tool_name == "search_files":
-    #             if state.n_search >= state.max_searches:
-    #                 return {
-    #                     "messages": [
-    #                         ToolMessage(
-    #                             content=json.dumps({"error": "Max searches reached"}),
-    #                             tool_call_id=tool_call.get("id"),
-    #                             name=tool_call.get("name"),
-    #                         )
-    #                     ],
-    #                     "n_search": state.n_search,
-    #                 }
-    #             queries = tool_args.get("queries", [])
-    #             results = self.search_files_tool.invoke({"queries": queries})
-
-    #             content = json.dumps(
-    #                 {"results": results, "query_count": len(queries)},
-    #                 ensure_ascii=False,
-    #             )
-    #             search_results.extend(results)
-    #         else:
-    #             content = json.dumps({"error": f"Unknown tool: {tool_name}"})
-
-    #         tool_message = ToolMessage(
-    #             content=content,
-    #             tool_call_id=tool_call.get("id"),
-    #             name=tool_call.get("name"),
-    #         )
-    #         tool_messages.append(tool_message)
-
-    #     except Exception as e:
-    #         error_content = json.dumps({"error": str(e)})
-    #         tool_message = ToolMessage(
-    #             content=error_content,
-    #             tool_call_id=tool_call.get("id"),
-    #             name=tool_call.get("name"),
-    #         )
-    #         tool_messages.append(tool_message)
-
-    #     return {
-    #         "messages": tool_messages,
-    #         "n_search": state.n_search + 1,
-    #         "search_results": search_results,
-    #     }
-
-    def _escalation(self, state: RAGAgentState) -> Dict[str, Any]:
-        """Execute the escalation"""
-
-        last_message = state.messages[-1]
-        tool_calls = getattr(last_message, "tool_calls", [])
-
-        if not tool_calls:
-            return {
-                "messages": [
-                    ToolMessage(
-                        content=json.dumps({"error": "No tool calls found"}),
-                        tool_call_id=None,
-                        name=None,
-                    )
-                ],
-                "escalation_result": state.escalation_result,
-            }
+    def _escalate(self, state: RAGAgentState) -> Dict[str, Any]:
+        """Handle escalation to human support"""
+        tool_call_id = None
+        tool_name = None
+        tool_call = None
+        
         try:
+            last_message = state.messages[-1]
+            tool_calls = getattr(last_message, "tool_calls", [])
+            
+            if not tool_calls:
+                return {
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps({"status": "error", "message": "No tool calls found"}),
+                            tool_call_id=None,
+                            name=None,
+                        )
+                    ],
+                }
+            
             tool_call = tool_calls[0]
-            tool_name = tool_call.get("name")
-            tool_call_id = tool_call.get("id")
-            tool_args = tool_call.get("args", {})
+            
+            if isinstance(tool_call, dict):
+                tool_call_id = tool_call.get("id")
+                tool_name = tool_call.get("name")
+                tool_args = tool_call.get("args", {})
+            else:
+                tool_call_id = getattr(tool_call, "id", None)
+                tool_name = getattr(tool_call, "name", None)
+                tool_args = getattr(tool_call, "args", {})
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                logger.warning("⚠️ Tool call ID not found, generating one")
+                tool_call_id = f"escalate_{datetime.now().timestamp()}"
 
-            message = tool_args.get("message", "")
-            confidence = tool_args.get("confidence", 0)
-            reason = tool_args.get("reason", "")
+            logger.info(f"🚨 Executing escalation with args: {tool_args}")
 
-            escalation_result = self.escalation_tool.invoke(
-                {"message": message, "confidence": confidence, "reason": reason}
+            result = self.escalation_tool.invoke(tool_args)
+
+            logger.info(f"✅ Escalation completed: {result}")
+
+            tool_message = ToolMessage(
+                content=json.dumps(result, ensure_ascii=False),
+                tool_call_id=tool_call_id,
+                name=tool_name or "escalate_to_human"
             )
 
-            logger.info(f"[ESCALATION] Tool called successfully: {escalation_result}")
-
-            escalation_dict = {
-                "escalated": escalation_result.escalated,
-                "escalation_id": escalation_result.escalation_id,
-                "reason": escalation_result.reason,
-            }
-
-            return {
-                "messages": [
-                    ToolMessage(
-                        content=json.dumps({"escalation_result": escalation_dict}),
-                        tool_call_id=tool_call_id,
-                        name=tool_name,
-                    )
-                ],
-                "escalation_result": escalation_result,
-            }
+            return {"messages": [tool_message]}
 
         except Exception as e:
-            logger.error(f"[ESCALATION ERROR] {str(e)}")
+            logger.error(f"❌ Error in _escalate: {str(e)}")
             import traceback
+            traceback.print_exc()
 
+            if not tool_call_id and tool_call:
+                if isinstance(tool_call, dict):
+                    tool_call_id = tool_call.get("id")
+                    tool_name = tool_call.get("name")
+                else:
+                    tool_call_id = getattr(tool_call, "id", None)
+                    tool_name = getattr(tool_call, "name", None)
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                tool_call_id = f"escalate_error_{datetime.now().timestamp()}"
+
+            error_content = json.dumps({"status": "error", "message": str(e)})
+            tool_message = ToolMessage(
+                content=error_content,
+                tool_call_id=tool_call_id,
+                name=tool_name or "escalate_to_human"
+            )
+            return {"messages": [tool_message], "error_message": str(e)}
+
+    def _check_availability(self, state: RAGAgentState) -> Dict[str, Any]:
+        """Handle checking appointment availability"""
+        tool_call_id = None
+        tool_name = None
+        tool_call = None
+        
+        try:
+            last_message = state.messages[-1]
+            tool_calls = getattr(last_message, "tool_calls", [])
+            
+            if not tool_calls:
+                return {
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps({"available_slots": [], "count": 0, "error": "No tool calls found"}),
+                            tool_call_id=None,
+                            name=None,
+                        )
+                    ],
+                }
+            
+            tool_call = tool_calls[0]
+            
+            if isinstance(tool_call, dict):
+                tool_call_id = tool_call.get("id")
+                tool_name = tool_call.get("name")
+                tool_args = tool_call.get("args", {})
+            else:
+                tool_call_id = getattr(tool_call, "id", None)
+                tool_name = getattr(tool_call, "name", None)
+                tool_args = getattr(tool_call, "args", {})
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                logger.warning("⚠️ Tool call ID not found, generating one")
+                tool_call_id = f"check_availability_{datetime.now().timestamp()}"
+
+            logger.info(f"📅 Checking availability with args: {tool_args}")
+
+            result = self.check_availability_tool.invoke(tool_args)
+
+            logger.info(f"✅ Availability check completed: found {result.get('count', 0)} slots")
+
+            tool_message = ToolMessage(
+                content=json.dumps(result, ensure_ascii=False),
+                tool_call_id=tool_call_id,
+                name=tool_name or "check_availability"
+            )
+
+            return {"messages": [tool_message]}
+
+        except Exception as e:
+            logger.error(f"❌ Error in _check_availability: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+            if not tool_call_id and tool_call:
+                if isinstance(tool_call, dict):
+                    tool_call_id = tool_call.get("id")
+                    tool_name = tool_call.get("name")
+                else:
+                    tool_call_id = getattr(tool_call, "id", None)
+                    tool_name = getattr(tool_call, "name", None)
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                tool_call_id = f"check_availability_error_{datetime.now().timestamp()}"
+
+            error_content = json.dumps({"available_slots": [], "count": 0, "error": str(e)})
+            tool_message = ToolMessage(
+                content=error_content,
+                tool_call_id=tool_call_id,
+                name=tool_name or "check_availability"
+            )
+            return {"messages": [tool_message], "error_message": str(e)}
+
+    def _create_booking(self, state: RAGAgentState) -> Dict[str, Any]:
+        """Handle creating an appointment booking"""
+        tool_call_id = None
+        tool_name = None
+        tool_call = None
+        
+        try:
+            last_message = state.messages[-1]
+            tool_calls = getattr(last_message, "tool_calls", [])
+            
+            if not tool_calls:
+                return {
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps({"status": "error", "message": "No tool calls found"}),
+                            tool_call_id=None,
+                            name=None,
+                        )
+                    ],
+                }
+            
+            tool_call = tool_calls[0]
+            
+            if isinstance(tool_call, dict):
+                tool_call_id = tool_call.get("id")
+                tool_name = tool_call.get("name")
+                tool_args = tool_call.get("args", {})
+            else:
+                tool_call_id = getattr(tool_call, "id", None)
+                tool_name = getattr(tool_call, "name", None)
+                tool_args = getattr(tool_call, "args", {})
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                logger.warning("⚠️ Tool call ID not found, generating one")
+                tool_call_id = f"create_booking_{datetime.now().timestamp()}"
+
+            logger.info(f"📅 Creating booking with args: {tool_args}")
+
+            result = self.booking_tool.invoke(tool_args)
+
+            logger.info(f"✅ Booking creation completed: {result}")
+
+            tool_message = ToolMessage(
+                content=json.dumps(result, ensure_ascii=False),
+                tool_call_id=tool_call_id,
+                name=tool_name or "create_booking"
+            )
+
+            return {"messages": [tool_message]}
+
+        except Exception as e:
+            logger.error(f"❌ Error in _create_booking: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+            if not tool_call_id and tool_call:
+                if isinstance(tool_call, dict):
+                    tool_call_id = tool_call.get("id")
+                    tool_name = tool_call.get("name")
+                else:
+                    tool_call_id = getattr(tool_call, "id", None)
+                    tool_name = getattr(tool_call, "name", None)
+            
+            if tool_call_id:
+                tool_call_id = str(tool_call_id)
+            
+            if not tool_call_id:
+                tool_call_id = f"create_booking_error_{datetime.now().timestamp()}"
+
+            error_content = json.dumps({"status": "error", "message": str(e)})
+            tool_message = ToolMessage(
+                content=error_content,
+                tool_call_id=tool_call_id,
+                name=tool_name or "create_booking"
+            )
+            return {"messages": [tool_message], "error_message": str(e)}
+
+    async def process_message(self, message: str) -> Dict[str, Any]:
+        """
+        Process a message through the RAG agent and return the response.
+        
+        Args:
+            message: The user's message content
+            
+        Returns:
+            dict with:
+            - response: The AI's response text
+            - intent: Detected intent (optional)
+            - confidence: Confidence score (optional)
+            - sources: List of sources used (optional)
+            - escalated: Whether conversation was escalated (optional)
+        """
+        try:
+            logger.info(f"Processing message for conversation {self.conversation_id}, checkpointer={self.checkpointer}")
+            
+            config = None
+            if self.checkpointer is not None:
+                config = {"configurable": {"thread_id": self.conversation_id}}
+            
+            initial_state = {
+                "messages": self.system_prompt + [HumanMessage(content=message)],
+                "n_search": 0,
+                "search_results": [],
+            }
+            
+            logger.info(f"Invoking graph with config={config is not None}, checkpointer={self.checkpointer is not None}")
+            
+            if self.checkpointer is not None:
+                def run_sync():
+                    return self.graph.invoke(initial_state, config=config)
+                result = await asyncio.to_thread(run_sync)
+            else:
+                result = await self.graph.ainvoke(initial_state)
+            
+            last_message = result.get("messages", [])[-1] if result.get("messages") else None
+            
+            if isinstance(last_message, AIMessage):
+                response_text = last_message.content
+            else:
+                response_text = str(last_message) if last_message else "Désolé, je n'ai pas pu générer de réponse."
+            
+            escalated = False
+            for msg in result.get("messages", []):
+                if isinstance(msg, ToolMessage) and "escalate" in msg.content.lower():
+                    escalated = True
+                    break
+            return {
+                "response": response_text,
+                "intent": "general",
+                "confidence": 0.8,
+                "sources": result.get("search_results", []),
+                "escalated": escalated,
+            }
+        except Exception as e:
+            logger.error(f"Error processing message: {e}", exc_info=True)
+            import traceback
             traceback.print_exc()
             return {
-                "messages": [
-                    ToolMessage(
-                        content=json.dumps({"error": str(e)}),
-                        tool_call_id=tool_call_id,
-                        name=tool_name,
-                    )
-                ],
-                "escalation_result": state.escalation_result,
+                "response": f"Erreur lors du traitement: {str(e)}",
+                "intent": "error",
+                "confidence": 0.0,
+                "sources": [],
+                "escalated": False,
             }
 
 
 def create_rag_agent(
     user_id: str,
     conversation_id: str,
-    summarization_model_name: str = "gpt-4o-mini",
+    summarization_model_name: Optional[str] = None,
     summarization_max_tokens: int = 350,
-    model_name: str = "gpt-4o-mini",
+    model_name: Optional[str] = None,
     max_searches: int = 3,
-    system_prompt: str = "",
+    system_prompt: Optional[str] = None,
     trim_strategy: Literal["none", "hard", "summary"] = "summary",
-    max_tokens: int = 8000,
-    max_find_answers: int = 5,
+    max_tokens: Optional[int] = None,
     test_mode: bool = False,
     checkpointer=None,
 ) -> RAGAgent:
-    """Factory function to create a RAG Agent"""
+    """Factory function to create a RAG Agent with settings from database"""
+    ai_settings = get_ai_settings_from_db(user_id)
+
+    final_model_name = model_name or ai_settings["model_name"]
+    final_system_prompt = system_prompt if system_prompt else ai_settings["system_prompt"]
+    final_summarization_model_name = summarization_model_name or ai_settings["model_name"]
+    final_max_tokens = max_tokens if max_tokens else ai_settings["max_tokens"]
+
+    # Fetch FAQs from database and append to system prompt
+    try:
+        db = get_db()
+        faqs_result = db.table("faqs").select("*").eq("user_id", user_id).execute()
+
+        if faqs_result.data and len(faqs_result.data) > 0:
+            faq_context = "\n\n=== FAQ (Questions Fréquentes) ===\n"
+            for faq in faqs_result.data:
+                faq_context += f"\nQuestion: {faq['question']}\n"
+
+                # Add variants if they exist
+                if faq.get('variants') and len(faq['variants']) > 0:
+                    variants_str = ", ".join(faq['variants'])
+                    faq_context += f"Variantes: {variants_str}\n"
+
+                faq_context += f"Réponse: {faq['answer']}\n"
+
+                # Add category if available
+                if faq.get('category'):
+                    faq_context += f"Catégorie: {faq['category']}\n"
+
+            final_system_prompt += faq_context
+            logger.info(f"Added {len(faqs_result.data)} FAQs to system prompt")
+    except Exception as e:
+        logger.error(f"Error loading FAQs for system prompt: {e}")
+
+    # Add current date to system prompt
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    date_context = f"\n\n=== Date Actuelle ===\nAujourd'hui nous sommes le: {current_date}\n"
+    final_system_prompt += date_context
+
+    logger.info(f"Creating RAG agent with settings: model={final_model_name}, system_prompt_length={len(final_system_prompt)}")
+
     return RAGAgent(
         user_id=user_id,
         conversation_id=conversation_id,
-        model_name=model_name,
+        model_name=final_model_name,
         max_searches=max_searches,
-        max_find_answers=max_find_answers,
         trim_strategy=trim_strategy,
-        summarization_model_name=summarization_model_name,
+        summarization_model_name=final_summarization_model_name,
         summarization_max_tokens=summarization_max_tokens,
-        max_tokens=max_tokens,
-        system_prompt=system_prompt,
+        max_tokens=final_max_tokens,
+        system_prompt=final_system_prompt,
         checkpointer=checkpointer,
         test_mode=test_mode,
     )
@@ -1062,7 +1205,6 @@ if __name__ == "__main__":
         system_prompt="You are a helpful assistant that can answer questions and help with tasks.",
         trim_strategy="summary",
         max_tokens=6000,
-        max_find_answers=5,
         checkpointer=CHECKPOINTER_POSTGRES,
         test_mode=True,
     )

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Support Widget - Test Page</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+
+    .hero {
+      text-align: center;
+      color: white;
+      padding: 60px 20px;
+    }
+
+    .hero h1 {
+      font-size: 48px;
+      margin-bottom: 20px;
+      font-weight: 700;
+    }
+
+    .hero p {
+      font-size: 20px;
+      opacity: 0.9;
+      margin-bottom: 40px;
+    }
+
+    .content {
+      background: white;
+      border-radius: 16px;
+      padding: 40px;
+      margin-top: 40px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    .content h2 {
+      color: #333;
+      margin-top: 0;
+      margin-bottom: 20px;
+    }
+
+    .content p {
+      color: #666;
+      line-height: 1.6;
+      margin-bottom: 20px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 30px;
+      margin-top: 40px;
+    }
+
+    .feature {
+      text-align: center;
+      padding: 30px;
+      background: #f9fafb;
+      border-radius: 12px;
+      transition: transform 0.2s;
+    }
+
+    .feature:hover {
+      transform: translateY(-5px);
+    }
+
+    .feature-icon {
+      font-size: 48px;
+      margin-bottom: 15px;
+    }
+
+    .feature h3 {
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .feature p {
+      color: #666;
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .cta {
+      text-align: center;
+      margin-top: 60px;
+      padding: 40px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 16px;
+      color: white;
+    }
+
+    .cta h2 {
+      margin-top: 0;
+      margin-bottom: 20px;
+    }
+
+    .cta p {
+      font-size: 18px;
+      opacity: 0.9;
+      margin-bottom: 30px;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background: white;
+      color: #667eea;
+      padding: 15px 40px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 16px;
+      transition: transform 0.2s;
+    }
+
+    .cta-button:hover {
+      transform: scale(1.05);
+    }
+
+    .footer {
+      text-align: center;
+      color: white;
+      padding: 40px 20px;
+      opacity: 0.8;
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <div class="container">
+      <h1>🚀 AI Support Widget Test</h1>
+      <p>This page demonstrates the embeddable AI Support Widget in action</p>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="content">
+      <h2>Welcome to Our Demo Site</h2>
+      <p>
+        This is a test page to demonstrate how the AI Support Widget works when embedded on a website.
+        Notice the chat widget button in the bottom-right corner? Click it to start a conversation with our AI assistant!
+      </p>
+
+      <p>
+        The widget is fully functional and connected to the backend API. You can:
+      </p>
+
+      <ul>
+        <li>Ask questions about products or services</li>
+        <li>Request human support (escalation)</li>
+        <li>Book appointments via Cal.com integration</li>
+        <li>Get instant AI-powered responses</li>
+      </ul>
+
+      <div class="feature-grid">
+        <div class="feature">
+          <div class="feature-icon">💬</div>
+          <h3>Instant Responses</h3>
+          <p>Get immediate answers to common questions powered by AI</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon">🤝</div>
+          <h3>Human Escalation</h3>
+          <p>Request to speak with a real person when needed</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon">📅</div>
+          <h3>Easy Booking</h3>
+          <p>Schedule appointments directly through the chat</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon">🎨</div>
+          <h3>Customizable</h3>
+          <p>Match your brand with custom colors and text</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="cta">
+      <h2>Try it now!</h2>
+      <p>Click the chat button in the bottom-right corner to start a conversation</p>
+      <a href="#" class="cta-button" onclick="event.preventDefault(); document.querySelector('#ai-widget-toggle').click();">
+        Open Chat Widget
+      </a>
+    </div>
+  </div>
+
+  <div class="footer">
+    <p>AI Support Widget Test Page | Powered by CustomerAI Agent</p>
+  </div>
+
+  <!-- AI Support Widget -->
+  <script src="./widget.js"></script>
+  <script>
+    // Initialize the widget
+    AISupportWidget.init({
+      apiKey: "demo-widget-key",
+      baseUrl: "http://localhost:8000",
+      primaryColor: "#667eea",
+      title: "AI Support",
+      subtitle: "We're here to help! 👋",
+      position: "bottom-right",
+      showBranding: true
+    });
+  </script>
+</body>
+</html>

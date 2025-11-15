@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Support Platform - Intelligent Customer Service Automation</title>
+    <meta name="description" content="AI-powered customer support platform with multi-channel integration, intelligent analytics, and knowledge base management." />
+    <meta name="author" content="AI Support" />
+
+    <meta property="og:title" content="AI Support Platform - Intelligent Customer Service" />
+    <meta property="og:description" content="AI-powered customer support with multi-channel integration and intelligent automation." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@Lovable" />
+    <meta name="twitter:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script src="/widget.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {
+        if (window.AISupportWidget) {
+          AISupportWidget.init({
+            baseUrl: 'http://localhost:8000',
+            primaryColor: '#0ea5e9',
+            title: 'AI Support',
+            subtitle: "We're here to help",
+            position: 'bottom-right',
+            showBranding: true
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

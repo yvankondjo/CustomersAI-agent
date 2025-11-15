@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Produits - Site Web de Test</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="header">
+    <div class="container">
+      <div class="logo">
+        <h1>🚀 Ma Boutique</h1>
+      </div>
+      <nav class="nav">
+        <a href="index.html" class="nav-link">Accueil</a>
+        <a href="products.html" class="nav-link active">Produits</a>
+        <a href="about.html" class="nav-link">À propos</a>
+        <a href="contact.html" class="nav-link">Contact</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="content-section">
+      <div class="container">
+        <h2 class="section-title">Nos Produits</h2>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <div class="feature-icon">📱</div>
+            <h3>Produit A</h3>
+            <p>Description du produit A avec toutes ses fonctionnalités</p>
+            <p class="price">99€</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">💻</div>
+            <h3>Produit B</h3>
+            <p>Description du produit B avec toutes ses fonctionnalités</p>
+            <p class="price">199€</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">⌚</div>
+            <h3>Produit C</h3>
+            <p>Description du produit C avec toutes ses fonctionnalités</p>
+            <p class="price">299€</p>
+          </div>
+        </div>
+        <p style="text-align: center; margin-top: 2rem; color: #64748b;">
+          Besoin d'aide pour choisir ? Utilisez le chatbot en bas à droite ! 💬
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <p>&copy; 2024 Site Web de Test - AI Support Widget</p>
+    </div>
+  </footer>
+
+  <script src="widget.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      if (window.AISupportWidget) {
+        AISupportWidget.init({
+          baseUrl: 'http://localhost:8000',
+          primaryColor: '#0ea5e9',
+          title: 'Support AI',
+          subtitle: 'Comment puis-je vous aider ?',
+          position: 'bottom-right',
+          showBranding: true
+        });
+      }
+    });
+  </script>
+</body>
+</html>
+
